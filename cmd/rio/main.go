@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/polydawn/refmt"
@@ -19,6 +20,9 @@ import (
 	"go.polydawn.net/rio/fs"
 	"go.polydawn.net/rio/fs/osfs"
 	"go.polydawn.net/rio/fsOp"
+	"go.polydawn.net/rio/transmat/tar"
+
+	"archive/tar"
 )
 
 func main() {
@@ -270,6 +274,43 @@ func Parse(ctx context.Context, args []string, stdin io.Reader, stdout, stderr i
 			return nil
 		}}
 	}
+	{
+		cmd := app.Command("inspect", "Generate manifests from warehouse-file")
+		args := struct {
+			WareLocation string
+		}{}
+		cmd.Arg("target", "Warehouse location pointing to a ware").
+			Required().
+			StringVar(&args.WareLocation)
+		bhvs[cmd.FullCommand()] = &behavior{&args, func() (err error) {
+			defer RequireErrorHasCategory(&err, rio.ErrorCategory(""))
+
+			if !strings.HasPrefix(args.WareLocation, "file://") {
+				return Errorf(rio.ErrUsage, "rio inspect only supports local warehouse schemes (starting with 'file://')")
+			}
+
+			f, err := os.Open(strings.TrimPrefix(args.WareLocation, "file://"))
+			if err != nil {
+				return err
+			}
+
+			//packType, err := guessPackType(args.WareLocation) // Todo: align with Scan
+			if err != nil {
+				return err
+			}
+
+			manifest, err := generateTarManifest(f, ctx)
+			if err != nil {
+				return err
+			}
+
+			//			json, err := encoding.json.Marshal(manifest)
+			marshaller := refmt.NewMarshallerAtlased(json.EncodeOptions{}, oc.stdout, rio.Atlas)
+			err = marshaller.Marshal(manifest)
+
+			return nil
+		}}
+	}
 	// Okay now let's be clear: actually all of these behaviors should, end of day,
 	//  actually send their errors through our output control.
 	//  We still also return it, both so you can write tests around this
@@ -395,4 +436,59 @@ func convertWarehouseSlice(slice []string) []api.WarehouseLocation {
 		result[idx] = api.WarehouseLocation(item)
 	}
 	return result
+}
+
+// path must be valid file reference
+func guessPackType(path string) (string, error) {
+	return "tar", nil
+}
+
+func generateTarManifest(stream io.ReadSeeker, ctx context.Context) (map[string]map[string]interface{}, error) {
+	reader, err := PassthruDecompressReader(stream)
+	if err != nil {
+		return nil, err
+	}
+
+	tr := tar.NewReader(reader)
+	manifest := make(map[string]map[string]interface{})
+
+	for {
+		thdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, Errorf(rio.ErrWareCorrupt, "corrupt tar: %s", err)
+		}
+		if ctx.Err() != nil {
+			return nil, Errorf(rio.ErrCancelled, "cancelled")
+		}
+
+		item := make(map[string]interface{})
+		item["mode"] = thdr.Mode
+		item["uid"] = thdr.Uid
+		item["gid"] = thdr.Gid
+		item["size_bytes"] = thdr.Size
+
+		manifest[thdr.Name] = item
+	}
+
+	return manifest, nil
+}
+
+func PassthruDecompressReader(stream io.ReadSeeker) (io.Reader, error) {
+	buffer := make([]byte, 64)
+	n, err := stream.Read(buffer)
+	if err != nil {
+		return nil, err
+	}
+
+	compression := tartrans.DetectCompression(buffer)
+	stream.Seek(int64(-n), 1)
+
+	if compression != tartrans.Uncompressed {
+		return tartrans.Decompress(stream)
+	}
+
+	return stream, nil
 }
