@@ -64,3 +64,13 @@ rio unpack tar:879UrF8j7E[...]udF57KpF8 \
 ```
 
 They get your files.  Boom.  Huge amounts of data.  Just one handle to copypaste: that hash.
+
+Building
+--------
+
+```
+gof test
+git submodule update --init
+gof build ./cmd/rio
+
+```
